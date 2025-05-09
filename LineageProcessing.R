@@ -111,30 +111,63 @@ grepCells <- function(CDData, cells=NULL, lineages=NULL,
 RePosition <- function(CDFrame, time, indicatorP = "C", indicatorD = "Cxa",
                        indicatorV = "MSxxp", indicatorL = NULL, indicatorR = NULL,
                        xSize=0.08651, ySize=0.08651, zSize=0.5){
-  searchString <- paste0(":",as.character(time),"$")
-  
   CDFrame <- CDFrame |> grepCells(lineages = "ALL", times = time)
   CDFrame$x <- CDFrame$x*xSize
   CDFrame$y <- CDFrame$y*ySize
   CDFrame$z <- CDFrame$z*zSize
+  #move the embryo to 0,0,0 by averaging the top 95% and bottom 5% values
+  CDFrame$x <- CDFrame$x-mean(quantile(CDFrame$x, probs = c(0.05, 0.95)))
+  CDFrame$y <- CDFrame$y-mean(quantile(CDFrame$y, probs = c(0.05, 0.95)))
+  CDFrame$z <- CDFrame$z-mean(quantile(CDFrame$z, probs = c(0.05, 0.95)))
+  
+  transformMatrix <- rotationVec(CDFrame, indicatorP, indicatorD, indicatorV, indicatorL, indicatorR)
+  
+  coords <- as.matrix(CDFrame[, c("x", "y", "z")])
+  transformed_coords <- coords %*% transformMatrix
+  CDFrame$x <- transformed_coords[, 1]
+  CDFrame$y <- transformed_coords[, 2]
+  CDFrame$z <- transformed_coords[, 3]
+  row.names(CDFrame)<- NULL
+  return(CDFrame)
+}
+
+totalRePosition <- function(CDFrame, time, indicatorP = "C", indicatorD = "Cxa",
+                            indicatorV = "MSxxp", indicatorL = NULL, indicatorR = NULL,
+                            xSize=0.08651, ySize=0.08651, zSize=0.5){
+  CDFrame$x <- CDFrame$x*xSize
+  CDFrame$y <- CDFrame$y*ySize
+  CDFrame$z <- CDFrame$z*zSize
+  
+  #align the embryo center to (0,0,0)
+  positionAgg_FUN <- function(X){mean(quantile(X, probs = c(0.05, 0.95)))}
+  centerCord <- aggregate(cbind(x,y,z)~time, data = CDFrame, FUN = positionAgg_FUN)
+  cellCount <- count(CDFrame, time)
+  t_start <- min(cellCount[cellCount[,"n"]>=50,"time"]) #embryos with >50 cells have more stable center coordination calculated by this method
+  coord_start <- centerCord[centerCord[,"time"]==t_start,c("x","y","z")]
+  centerCord[centerCord[,"time"]<t_start,c("x","y","z")] <- coord_start
+  CDFrame <- left_join(CDFrame, centerCord, by = "time", suffix = c("", "_c"))
+  CDFrame[,c("x","y","z")] <- CDFrame[,c("x","y","z")] - CDFrame[,c("x_c","y_c","z_c")]
+  CDFrame <- CDFrame[,!names(CDFrame)%in%c("x_c","y_c","z_c")]
+  CD_timeRef <- CDFrame |> grepCells(lineages = "ALL", times = time)
+  
+  transformMatrix <- rotationVec(CD_timeRef, indicatorP, indicatorD, indicatorV, indicatorL, indicatorR)
+  coords <- as.matrix(CDFrame[, c("x", "y", "z")])
+  transformed_coords <- coords %*% transformMatrix
+  CDFrame$x <- transformed_coords[, 1]
+  CDFrame$y <- transformed_coords[, 2]
+  CDFrame$z <- transformed_coords[, 3]
+  return(CDFrame)
+}
+
+
+rotationVec <- function(CDFrame, indicatorP, indicatorD, indicatorV, indicatorL, indicatorR){
   # 1) find the AB axis for this embryo
   pca1 <- prcomp(CDFrame[,c('x','y','z')]) #prcomp() always returns unit vectors
-  CDFrame$x <- CDFrame$x-pca1$center[["x"]]
-  CDFrame$y <- CDFrame$y-pca1$center[["y"]]
-  CDFrame$z <- CDFrame$z-pca1$center[["z"]]
   APVect <- pca1$rotation[c(1,2,3)] #get the PC1 transformation UNIT vector
   PCells <- grepCells(CDFrame, lineages = indicatorP) #make sure that positive value for principle component 1 transformation vector is toward the A side
   PCellsVect <- c(mean(PCells$x), mean(PCells$y), mean(PCells$z))
   if(sum(PCellsVect*APVect)>0){APVect <- -APVect}
   # 2) find the unit transformation vector toward D side
-  OrthgonalProj <- function(v,u){#Gram-Schmidt Process gives the orthogonal component to AP axis
-    vOrth <- v - (sum(v*u)*u)
-  }
-  cross_product <- function(v, u) {
-    c(v[2] * u[3] - v[3] * u[2],
-      v[3] * u[1] - v[1] * u[3],
-      v[1] * u[2] - v[2] * u[1])
-  }
   DVVect <- c(0,0,0)
   if(!is.null(indicatorD)){ #directional contribution from each indicator lineage
     DCells <- grepCells(CDFrame, lineages = indicatorD)
@@ -160,15 +193,18 @@ RePosition <- function(CDFrame, time, indicatorP = "C", indicatorD = "Cxa",
   DVVect <- DVVect/sqrt(sum(DVVect^2))#scale into a unit vector
   # 3) use vector cross product to get RL transformation vector (+ side is the right side)
   RLVect <- cross_product(APVect, DVVect)
-  #transformation
   transformMatrix <- cbind(APVect,RLVect,DVVect)
-  coords <- as.matrix(CDFrame[, c("x", "y", "z")])
-  transformed_coords <- coords %*% transformMatrix
-  CDFrame$x <- transformed_coords[, 1]
-  CDFrame$y <- transformed_coords[, 2]
-  CDFrame$z <- transformed_coords[, 3]
-  row.names(CDFrame)<- NULL
-  return(CDFrame)
+  return(transformMatrix)
+}
+#'Gram-Schmidt Process gives the orthogonal component to AP axis
+OrthgonalProj <- function(v,u){
+  vOrth <- v - (sum(v*u)*u)
+}
+#' vector cross-product for orthogonal vector
+cross_product <- function(v, u) {
+  c(v[2] * u[3] - v[3] * u[2],
+    v[3] * u[1] - v[1] * u[3],
+    v[1] * u[2] - v[2] * u[1])
 }
 
 #' blotRange return the range (min, max) of blot values in a given CD-like dataframe
@@ -223,15 +259,17 @@ blotAvgFun <- function(datList, cutoff = 0.5){
 #'
 #' @examples lineageNames(c("EMS", "C"))
 lineageNames <- function(lineage){
-  P4 = c("P4", "Z2", "Z3")
-  P3 = c("P3", "D", P4)
-  P2 = c("P2", "C", P3)
-  EMS = c("EMS", "MS", "E")
-  P1 = c("P1", EMS, P2)
-  P0 = c("AB", P1)
-  lineageDict <- list("P4" = P4, "P3" = P3, "P2" = P2, "P1" = P1, "P0" = P0, "EMS" = EMS)
+  P4 <- c("P4", "Z2", "Z3")
+  P3 <- c("P3", "D", P4)
+  P2 <- c("P2", "C", P3)
+  EMS <- c("EMS", "MS", "E")
+  E <- c("E$", "Ex")
+  P1 <- c("P1", EMS, P2)
+  P0 <- c("AB", P1)
+  lineageDict <- list("P4" = P4, "P3" = P3, "P2" = P2, "P1" = P1, "P0" = P0, "EMS" = EMS, "E" = E)
   out<- lineage
-  if(lineage %in% names(lineageDict)){out<-union(out, unlist(lineageDict[lineage]))}
+  if(lineage %in% names(lineageDict)){out<-unlist(lineageDict[lineage])}
+  else{out <- lineage}
   out
 }
 
@@ -243,8 +281,7 @@ lineageNames <- function(lineage){
 #' @export
 #' @examples lineageRE(c("EMS", "C"))
 lineageRE <- function(lineage){
-  sublineage<- lineage |> lapply(lineageNames)
-  lineage <- union(lineage, sublineage|>unlist())
+  lineage<- lineage |> lapply(lineageNames)|>unlist()
   REs <- lineage |> lapply(function(line){paste0("^", gsub("x", "[a-z]", line))})
   return(REs)
 }

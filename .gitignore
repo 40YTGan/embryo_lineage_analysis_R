@@ -16,4 +16,6 @@
 *.log
 *.txt
 *.zip
+.Rprofile
 README.Rmd
+drawEmb.Rmd
